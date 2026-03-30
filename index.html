@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flow Map Binding Tool</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>Flow Map Binding Tool</h1>
+    <div class="sub">
+      <strong>v1 • Girbilcannon.8259</strong><br />
+      Each screen section can contain one or more flow segments. Each segment has its own
+      <strong>.pew</strong> file, <strong>XML</strong> checkpoint file, bindings, and finish behavior.
+    </div>
+
+    <div class="card">
+      <div class="topline">
+        <div><strong>Project</strong></div>
+        <div class="pill">Selected screen section: <span id="selectedSectionPill">Left</span></div>
+      </div>
+
+      <div class="project-bar">
+        <div class="project-name-wrap">
+          <label for="layoutName">Layout name</label>
+          <input id="layoutName" type="text" placeholder="World 1 + World 2 Full Race" />
+        </div>
+
+        <div class="toolbar">
+          <button id="btnExport" class="primary">Export JSON</button>
+          <button id="btnAutoMatch">Auto Match Segment</button>
+        </div>
+      </div>
+
+      <div id="projectStatus" class="status">
+        Choose a screen section, add a segment, load files, and start binding.
+      </div>
+    </div>
+
+    <div class="workspace-grid">
+      <div class="card sidebar-card">
+        <div class="topline">
+          <div><strong>Screen Sections</strong></div>
+          <div class="pill">Layout edges</div>
+        </div>
+
+        <div class="section-list">
+          <button class="section-card active" data-side="left">
+            <span class="section-card-title">Left</span>
+            <span class="section-card-meta" id="meta-left">No segments</span>
+          </button>
+
+          <button class="section-card" data-side="top">
+            <span class="section-card-title">Top</span>
+            <span class="section-card-meta" id="meta-top">No segments</span>
+          </button>
+
+          <button class="section-card" data-side="right">
+            <span class="section-card-title">Right</span>
+            <span class="section-card-meta" id="meta-right">No segments</span>
+          </button>
+
+          <button class="section-card" data-side="bottom">
+            <span class="section-card-title">Bottom</span>
+            <span class="section-card-meta" id="meta-bottom">No segments</span>
+          </button>
+        </div>
+
+        <div class="hint">
+          Screen sections are visual containers only. Real path flow comes from the loaded
+          <strong>.pew</strong> graph.
+        </div>
+      </div>
+
+      <div class="editor-stack">
+        <div class="card">
+          <div class="topline">
+            <div><strong>Section Setup</strong></div>
+            <div class="pill" id="sectionBadge">Left</div>
+          </div>
+
+          <div class="section-grid">
+            <div>
+              <label for="sectionName">Screen section label</label>
+              <input id="sectionName" type="text" placeholder="Left Side Flow" />
+            </div>
+
+            <div>
+              <label for="direction">Direction</label>
+              <select id="direction">
+                <option value="bottom-to-top">Bottom → Top</option>
+                <option value="top-to-bottom">Top → Bottom</option>
+                <option value="left-to-right">Left → Right</option>
+                <option value="right-to-left">Right → Left</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="hint">
+            Direction affects only visual presentation on the chosen screen side. It does not change actual flow logic.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="topline">
+            <div><strong>Flow Segments</strong></div>
+            <div class="toolbar">
+              <button id="btnAddSegment">+ Add Segment</button>
+              <button id="btnRemoveSegment">Remove Selected Segment</button>
+            </div>
+          </div>
+
+          <div class="binding-grid">
+            <div>
+              <label>Segments on this side</label>
+              <div id="segmentList" class="list-box"></div>
+            </div>
+
+            <div>
+              <label>Selected segment setup</label>
+
+              <div class="stack-gap">
+                <div>
+                  <label for="segmentLabel">Segment label</label>
+                  <input id="segmentLabel" type="text" placeholder="W1-Z1" />
+                </div>
+
+                <div class="file-grid">
+                  <div class="file-box">
+                    <label for="pewFile">Planner file (.pew)</label>
+                    <input id="pewFile" type="file" />
+                    <div class="file-name" id="pewFileName">No .pew file loaded.</div>
+                  </div>
+
+                  <div class="file-box">
+                    <label for="checkpointFile">Checkpoint file (XML)</label>
+                    <input id="checkpointFile" type="file" accept=".xml" />
+                    <div class="file-name" id="checkpointFileName">No checkpoint file loaded.</div>
+                  </div>
+                </div>
+
+                <div class="hint">
+                  Bindings connect planner nodes to checkpoint records. Flow paths come from the actual
+                  <strong>.pew</strong> graph.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="topline">
+            <div><strong>Binding Workspace</strong></div>
+            <div class="pill"><span id="bindingSummary">0</span> bound in selected segment</div>
+          </div>
+
+          <div class="binding-grid">
+            <div>
+              <label>Planner nodes</label>
+              <div id="nodeList" class="list-box"></div>
+            </div>
+
+            <div>
+              <label>Checkpoint records</label>
+              <div id="checkpointList" class="list-box"></div>
+            </div>
+          </div>
+
+          <div class="hint">
+            Click a planner node, then click a checkpoint record to bind it. Double-click a node to clear its binding.
+            Up/down sorting changes visual layout only.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="topline">
+            <div><strong>Selected Node Options</strong></div>
+            <div class="pill" id="selectedNodePill">No node selected</div>
+          </div>
+
+          <div id="nodeOptionsEmpty" class="hint">
+            Select a bound node to configure finish behavior, disable it, or set a manual output override if needed.
+          </div>
+
+          <div id="nodeOptionsPanel" style="display:none;">
+            <div class="section-grid">
+              <div>
+                <label>Bound checkpoint</label>
+                <input id="selectedNodeBindingInfo" type="text" readonly />
+              </div>
+
+              <div>
+                <label>Checkpoint map ID</label>
+                <input id="selectedNodeMapIdInfo" type="text" readonly />
+              </div>
+            </div>
+
+            <div class="stack-gap">
+              <div>
+                <label>
+                  <input type="checkbox" id="isEndOfRace" />
+                  End of race
+                </label>
+              </div>
+
+              <div id="endModeWrap" style="display:none;">
+                <label for="endOfRaceMode">Finish trigger mode</label>
+                <select id="endOfRaceMode">
+                  <option value="checkpoint-reached">When checkpoint is reached</option>
+                  <option value="map-swap">Upon map swap</option>
+                </select>
+              </div>
+
+              <div>
+                <label class="danger-check">
+                  <input type="checkbox" id="ignoreNode" />
+                  Disable node
+                </label>
+              </div>
+
+              <hr class="option-divider" />
+
+              <div>
+                <label>Manual output override (advanced backup)</label>
+                <div id="outputOverrideList" class="list-box compact-list"></div>
+              </div>
+
+              <div class="hint">
+                Leave this empty to use the exact outputs from the <strong>.pew</strong> file. Only use override outputs if you need to patch a special case.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="topline">
+        <div><strong>Overlay Preview</strong></div>
+        <div class="pill">Selected side using real .pew graph</div>
+      </div>
+
+      <div class="preview-shell preview-shell-wide">
+        <canvas id="previewCanvas"></canvas>
+      </div>
+
+      <div class="hint">
+        Preview uses the real <strong>.pew</strong> graph connections, with visual branch spreading layered on top.
+      </div>
+    </div>
+  </div>
+
+  <script src="core/parser_pew.js"></script>
+  <script src="core/parser_csv.js"></script>
+  <script src="core/parser_xml.js"></script>
+  <script src="core/exporter.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
