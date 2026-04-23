@@ -460,7 +460,53 @@ function getPreviewEntryMap(entries) {
   return map;
 }
 
+// --------------------------
+// Structured label helpers
+// Optional stabilizer for names like:
+// S1_P1_CP1
+// S1-P1-CP2
+// S1 P2 CP3
+// --------------------------
+
+function parseStructuredNodeSequence(label) {
+  const text = String(label || "").trim();
+  if (!text) return null;
+
+  const match = text.match(/S\s*(\d+)\s*[_\-\s]*P\s*(\d+)\s*[_\-\s]*CP\s*(\d+)/i);
+  if (!match) return null;
+
+  return {
+    split: Number(match[1]),
+    path: Number(match[2]),
+    checkpoint: Number(match[3])
+  };
+}
+
+function getNodeStructuredSequence(node) {
+  if (!node) return null;
+  return parseStructuredNodeSequence(node.label || node.title || "");
+}
+
+function compareStructuredSequences(aSeq, bSeq) {
+  if (!aSeq && !bSeq) return 0;
+  if (aSeq && !bSeq) return -1;
+  if (!aSeq && bSeq) return 1;
+
+  if (aSeq.split !== bSeq.split) return aSeq.split - bSeq.split;
+  if (aSeq.path !== bSeq.path) return aSeq.path - bSeq.path;
+  if (aSeq.checkpoint !== bSeq.checkpoint) return aSeq.checkpoint - bSeq.checkpoint;
+  return 0;
+}
+
 function compareNodesForStablePreview(a, b) {
+  const aSeq = getNodeStructuredSequence(a);
+  const bSeq = getNodeStructuredSequence(b);
+
+  const structuredCompare = compareStructuredSequences(aSeq, bSeq);
+  if (structuredCompare !== 0) {
+    return structuredCompare;
+  }
+
   const aLabel = String(a?.label || "");
   const bLabel = String(b?.label || "");
 
@@ -469,6 +515,19 @@ function compareNodesForStablePreview(a, b) {
   }
 
   return String(a?.id || "").localeCompare(String(b?.id || ""));
+}
+
+function compareBranchNodesForFlow(a, b) {
+  const aSeq = getNodeStructuredSequence(a);
+  const bSeq = getNodeStructuredSequence(b);
+
+  if (aSeq && bSeq && aSeq.split === bSeq.split && aSeq.path === bSeq.path) {
+    if (aSeq.checkpoint !== bSeq.checkpoint) {
+      return aSeq.checkpoint - bSeq.checkpoint;
+    }
+  }
+
+  return compareNodesForStablePreview(a, b);
 }
 
 function averageNumbers(values) {
@@ -480,15 +539,19 @@ function averageNumbers(values) {
   return total / values.length;
 }
 
+// First child stays on trunk.
+// Additional children peel outward in stable order.
 function getDirectionalChildLaneOffsets(count) {
-  if (count <= 1) {
-    return [0];
-  }
+  if (count <= 0) return [];
+  if (count === 1) return [0];
 
-  if (count === 2) {
-    return [-1, 1];
-  }
+  // For a 2-way split, make a real V around the split lane.
+  if (count === 2) return [-0.5, 0.5];
 
+  // For 3-way splits, keep one centered and branch around it.
+  if (count === 3) return [-1, 0, 1];
+
+  // For 4+ outputs, spread symmetrically around center.
   const offsets = [];
   const center = (count - 1) / 2;
 
@@ -604,43 +667,99 @@ function findMatchingConvergeNodeId(segment, splitNodeId, entryByNodeId) {
       return maxDistA - maxDistB;
     }
 
-    return String(a).localeCompare(String(b));
+    const nodeA = segment.pewData.find(node => node.id === a);
+    const nodeB = segment.pewData.find(node => node.id === b);
+
+    return compareNodesForStablePreview(nodeA, nodeB);
   });
 
   return candidates[0];
 }
 
 function collectBranchBandNodes(segment, startNodeId, stopNodeId) {
-  const results = [];
+  const path = [];
   const visited = new Set();
 
-  let currentNodeId = startNodeId;
+  function walk(currentNodeId) {
+    if (!currentNodeId || currentNodeId === stopNodeId || visited.has(currentNodeId)) {
+      return currentNodeId === stopNodeId;
+    }
 
-  while (currentNodeId && currentNodeId !== stopNodeId && !visited.has(currentNodeId)) {
     visited.add(currentNodeId);
 
     const node = segment.pewData.find(n => n.id === currentNodeId);
     if (!node) {
-      break;
+      return false;
     }
 
-    results.push(node);
+    path.push(node);
 
     const outputs = getEffectiveOutputNodeIds(segment, currentNodeId);
-
-    if (outputs.length !== 1) {
-      break;
+    if (!outputs.length) {
+      return false;
     }
 
-    const nextNodeId = outputs[0];
-    if (!nextNodeId || nextNodeId === stopNodeId) {
-      break;
+    const reachableOutputs = outputs
+      .map(outputNodeId => {
+        const distances = computeReachableDistances(segment, outputNodeId);
+        const targetNode = segment.pewData.find(n => n.id === outputNodeId);
+        return {
+          outputNodeId,
+          targetNode,
+          reachesStop: distances.has(stopNodeId)
+        };
+      })
+      .filter(item => item.reachesStop);
+
+    if (!reachableOutputs.length) {
+      return false;
     }
 
-    currentNodeId = nextNodeId;
+    reachableOutputs.sort((a, b) => compareBranchNodesForFlow(a.targetNode, b.targetNode));
+
+    for (const item of reachableOutputs) {
+      const beforeCount = path.length;
+      const found = walk(item.outputNodeId);
+      if (found) {
+        return true;
+      }
+
+      path.length = beforeCount;
+    }
+
+    return false;
   }
 
-  return results;
+  walk(startNodeId);
+  return path;
+}
+
+function getOrderedSplitOutputs(segment, splitNodeId) {
+  const outputs = getEffectiveOutputNodeIds(segment, splitNodeId);
+
+  return outputs
+    .map(outputNodeId => {
+      const node = segment.pewData.find(n => n.id === outputNodeId);
+      return {
+        outputNodeId,
+        node
+      };
+    })
+    .filter(item => item.node)
+    .sort((a, b) => compareBranchNodesForFlow(a.node, b.node))
+    .map(item => item.outputNodeId);
+}
+
+function ensureConvergeDepthForBranches(splitEntry, convergeEntry, branchPaths) {
+  const longestBranchLength = branchPaths.reduce((max, branchPath) => {
+    return Math.max(max, branchPath.length);
+  }, 0);
+
+  const requiredDepth = splitEntry.depth + longestBranchLength + 1;
+
+  if (convergeEntry.depth < requiredDepth) {
+    convergeEntry.depth = requiredDepth;
+  }
 }
 
 function normalizeSplitBands(segment, entryByNodeId) {
@@ -658,7 +777,8 @@ function normalizeSplitBands(segment, entryByNodeId) {
     const splitEntry = entryByNodeId.get(splitNode.id);
     if (!splitEntry) return;
 
-    const outputs = getEffectiveOutputNodeIds(segment, splitNode.id);
+    const trunkLane = splitEntry.lane;
+    const outputs = getOrderedSplitOutputs(segment, splitNode.id);
     if (outputs.length < 2) return;
 
     const convergeNodeId = findMatchingConvergeNodeId(segment, splitNode.id, entryByNodeId);
@@ -667,47 +787,111 @@ function normalizeSplitBands(segment, entryByNodeId) {
     const convergeEntry = entryByNodeId.get(convergeNodeId);
     if (!convergeEntry) return;
 
+    const childOffsets = getDirectionalChildLaneOffsets(outputs.length);
+    const branchLanes = [];
+    const branchPaths = [];
+
+    outputs.forEach((outputNodeId, outputIndex) => {
+      const branchPath = collectBranchBandNodes(segment, outputNodeId, convergeNodeId)
+        .filter(node => {
+          const outputCount = getEffectiveOutputNodeIds(segment, node.id).length;
+          const inputCount = node.graphInputs?.length || 0;
+
+          return (
+            node.type !== "split" &&
+            node.type !== "converge" &&
+            node.id !== convergeNodeId &&
+            !(inputCount > 1 && node.id !== outputNodeId)
+          );
+        });
+
+      branchPaths.push(branchPath);
+      branchLanes.push(trunkLane + childOffsets[outputIndex]);
+    });
+
+    ensureConvergeDepthForBranches(splitEntry, convergeEntry, branchPaths);
+
     const span = convergeEntry.depth - splitEntry.depth;
     if (span <= 1) return;
 
-    outputs.forEach(outputNodeId => {
-      const firstNode = segment.pewData.find(n => n.id === outputNodeId);
-      if (!firstNode) return;
+    branchPaths.forEach((branchPath, branchIndex) => {
+      const branchLane = branchLanes[branchIndex];
+      const count = branchPath.length;
 
-      const firstNodeOutputCount = getEffectiveOutputNodeIds(segment, firstNode.id).length;
-      const firstNodeInputCount = firstNode.graphInputs?.length || 0;
-      const firstNodeIsComplex =
-        firstNode.type === "split" ||
-        firstNode.type === "converge" ||
-        firstNodeOutputCount !== 1 ||
-        firstNodeInputCount > 1;
-
-      // If the branch immediately turns into another split/merge, leave it alone.
-      if (firstNodeIsComplex) {
-        return;
-      }
-
-      const bandNodes = collectBranchBandNodes(segment, outputNodeId, convergeNodeId).filter(node => {
-        const outputCount = getEffectiveOutputNodeIds(segment, node.id).length;
-        const inputCount = node.graphInputs?.length || 0;
-
-        return (
-          node.type !== "split" &&
-          node.type !== "converge" &&
-          outputCount <= 1 &&
-          inputCount <= 1
-        );
-      });
-
-      if (!bandNodes.length) return;
-
-      bandNodes.forEach((node, index) => {
+      branchPath.forEach((node, nodeIndex) => {
         const nodeEntry = entryByNodeId.get(node.id);
         if (!nodeEntry) return;
 
-        nodeEntry.depth = splitEntry.depth + ((index + 1) / (bandNodes.length + 1)) * span;
+        nodeEntry.lane = branchLane;
+
+        // Stretch each branch across the whole split→converge span.
+        // Long path gets many steps, short path gets fewer, but still fills the band.
+        nodeEntry.depth = splitEntry.depth + ((nodeIndex + 1) / (count + 1)) * span;
       });
     });
+
+    const uniqueBranchLanes = [...new Set(branchLanes)];
+    if (uniqueBranchLanes.length) {
+      convergeEntry.lane = resolveConvergeLane(uniqueBranchLanes);
+    }
+  });
+}
+
+function resolveConvergeLane(incomingLanes) {
+  if (!Array.isArray(incomingLanes) || !incomingLanes.length) {
+    return 0;
+  }
+
+  const unique = [...new Set(incomingLanes)].sort((a, b) => a - b);
+
+  if (unique.length === 1) {
+    return unique[0];
+  }
+
+  if (unique.length === 2) {
+    return averageNumbers(unique);
+  }
+
+  if (unique.length === 3) {
+    // For a 3-way converge, keep the middle lane centered.
+    return unique[1];
+  }
+
+  return averageNumbers(unique);
+}
+
+function recenterConvergeEntries(segment, entryByNodeId) {
+  segment.pewData.forEach(node => {
+    const inputCount = node.graphInputs?.length || 0;
+    const outputCount = getEffectiveOutputNodeIds(segment, node.id).length;
+    const isConvergeLike = inputCount > 1 && outputCount <= 1;
+
+    if (!isConvergeLike) {
+      return;
+    }
+
+    const incomingEntries = (node.graphInputs || [])
+      .map(input => entryByNodeId.get(input.fromNodeId))
+      .filter(Boolean);
+
+    if (incomingEntries.length < 2) {
+      return;
+    }
+
+    const incomingLanes = incomingEntries
+      .map(entry => entry.lane)
+      .filter(lane => Number.isFinite(lane));
+
+    if (incomingLanes.length < 2) {
+      return;
+    }
+
+    const nodeEntry = entryByNodeId.get(node.id);
+    if (!nodeEntry) {
+      return;
+    }
+
+    nodeEntry.lane = resolveConvergeLane(incomingLanes);
   });
 }
 
@@ -724,13 +908,16 @@ function computeSegmentPreviewLayout(segment) {
   }
 
   const nodeById = new Map(segment.pewData.map(node => [node.id, node]));
-  const unresolvedIncoming = new Map();
-  const queuedLaneVotes = new Map();
+  const incomingRemaining = new Map();
+  const bestDepth = new Map();
+  const laneVotes = new Map();
   const placedEntries = new Map();
   const queue = [];
 
   segment.pewData.forEach(node => {
-    unresolvedIncoming.set(node.id, Array.isArray(node.graphInputs) ? node.graphInputs.length : 0);
+    incomingRemaining.set(node.id, Array.isArray(node.graphInputs) ? node.graphInputs.length : 0);
+    bestDepth.set(node.id, 0);
+    laneVotes.set(node.id, []);
   });
 
   const startNodes = segment.pewData
@@ -738,37 +925,50 @@ function computeSegmentPreviewLayout(segment) {
     .sort(compareNodesForStablePreview);
 
   if (!startNodes.length) {
-    queue.push({
-      node: segment.pewData[0],
-      depth: 0,
-      lane: 0
-    });
+    queue.push(segment.pewData[0]);
+    laneVotes.set(segment.pewData[0].id, [0]);
   } else {
     const rootOffsets = getDirectionalChildLaneOffsets(startNodes.length);
-
     startNodes.forEach((node, index) => {
-      queue.push({
-        node,
-        depth: 0,
-        lane: rootOffsets[index]
-      });
+      queue.push(node);
+      laneVotes.set(node.id, [rootOffsets[index]]);
+      bestDepth.set(node.id, 0);
     });
   }
 
   while (queue.length) {
-    const current = queue.shift();
-    const node = current.node;
-
+    const node = queue.shift();
     if (!node || placedEntries.has(node.id)) {
       continue;
     }
 
-    const votedLane = queuedLaneVotes.has(node.id)
-      ? averageNumbers(queuedLaneVotes.get(node.id))
-      : current.lane;
+    const nodeVotes = laneVotes.get(node.id) || [];
+    let finalLane = 0;
 
-    const finalDepth = current.depth;
-    const finalLane = votedLane;
+    const inputCount = node.graphInputs?.length || 0;
+
+    if (inputCount <= 1) {
+      finalLane = nodeVotes.length ? nodeVotes[0] : 0;
+    } else {
+      const sortedInputs = [...(node.graphInputs || [])].sort((a, b) => a.toSocketIndex - b.toSocketIndex);
+      const incomingLanes = sortedInputs
+        .map(input => placedEntries.get(input.fromNodeId))
+        .filter(Boolean)
+        .map(entry => entry.lane);
+
+      const outputCount = getEffectiveOutputNodeIds(segment, node.id).length;
+      const isConvergeLike = inputCount > 1 && outputCount <= 1;
+
+      if (isConvergeLike && incomingLanes.length) {
+        finalLane = resolveConvergeLane(incomingLanes);
+      } else if (incomingLanes.length) {
+        finalLane = incomingLanes[0];
+      } else {
+        finalLane = nodeVotes.length ? averageNumbers(nodeVotes) : 0;
+      }
+    }
+
+    const finalDepth = bestDepth.get(node.id) ?? 0;
 
     placedEntries.set(node.id, {
       segment,
@@ -786,27 +986,22 @@ function computeSegmentPreviewLayout(segment) {
 
     outputs.forEach((targetNodeId, outputIndex) => {
       const targetNode = nodeById.get(targetNodeId);
-      if (!targetNode) return;
-      if (placedEntries.has(targetNodeId)) return;
+      if (!targetNode || placedEntries.has(targetNodeId)) return;
 
-      const nextDepth = finalDepth + 1;
-      const nextLane = finalLane + laneOffsets[outputIndex];
-
-      if (!queuedLaneVotes.has(targetNodeId)) {
-        queuedLaneVotes.set(targetNodeId, []);
+      const proposedDepth = finalDepth + 1;
+      const currentBestDepth = bestDepth.get(targetNodeId) ?? 0;
+      if (proposedDepth > currentBestDepth) {
+        bestDepth.set(targetNodeId, proposedDepth);
       }
 
-      queuedLaneVotes.get(targetNodeId).push(nextLane);
+      const proposedLane = finalLane + laneOffsets[outputIndex];
+      laneVotes.get(targetNodeId).push(proposedLane);
 
-      const remaining = (unresolvedIncoming.get(targetNodeId) ?? 1) - 1;
-      unresolvedIncoming.set(targetNodeId, remaining);
+      const remaining = (incomingRemaining.get(targetNodeId) ?? 1) - 1;
+      incomingRemaining.set(targetNodeId, remaining);
 
       if (remaining <= 0) {
-        queue.push({
-          node: targetNode,
-          depth: nextDepth,
-          lane: averageNumbers(queuedLaneVotes.get(targetNodeId))
-        });
+        queue.push(targetNode);
       }
     });
   }
@@ -817,14 +1012,20 @@ function computeSegmentPreviewLayout(segment) {
     placedEntries.set(node.id, {
       segment,
       node,
-      depth: index,
+      depth: bestDepth.get(node.id) ?? index,
       lane: 0
     });
   });
 
   normalizeSplitBands(segment, placedEntries);
+  recenterConvergeEntries(segment, placedEntries);
 
-  const entries = [...placedEntries.values()];
+  const entries = [...placedEntries.values()].sort((a, b) => {
+    if (a.depth !== b.depth) return a.depth - b.depth;
+    if (a.lane !== b.lane) return a.lane - b.lane;
+    return compareNodesForStablePreview(a.node, b.node);
+  });
+
   const minLane = entries.reduce((min, entry) => Math.min(min, entry.lane), entries[0].lane);
   const maxLane = entries.reduce((max, entry) => Math.max(max, entry.lane), entries[0].lane);
   const laneCenter = (minLane + maxLane) / 2;
@@ -1375,15 +1576,13 @@ function buildSectionPreviewLane(section, width, height) {
         // Chain each segment directly after the previous one.
         depth: runningDepthOffset + localEntry.depth,
 
-        // Keep lane 0 as the true trunk so start/end stay aligned.
+        // Keep local lane shape across the whole side.
         lane: localEntry.lane
       });
     });
 
-    // Advance by the actual segment width.
     runningDepthOffset += layout.maxDepth;
 
-    // Small visual gap between segments.
     if (index < segmentLayouts.length - 1) {
       runningDepthOffset += segmentGapUnits;
     }
